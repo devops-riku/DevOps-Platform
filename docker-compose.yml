@@ -1,0 +1,98 @@
+version: '3.8'
+
+services:
+  traefik:
+    image: traefik:v2.10
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    networks:
+      - devops_proxy
+
+  database:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=jason
+      - POSTGRES_DB=devops_platform
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - devops_internal
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass riku
+    ports:
+      - "6379:6379"
+    networks:
+      - devops_internal
+
+  backend:
+    build: ./backend
+    restart: always
+    env_file: ./backend/.env
+    environment:
+      - REDIS_HOST=redis
+      - POSTGRES_SERVER=database
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`api.localhost`)"
+      - "traefik.http.routers.api.entrypoints=web"
+      - "traefik.http.services.api.loadbalancer.server.port=8000"
+    depends_on:
+      - database
+      - redis
+    networks:
+      - devops_proxy
+      - devops_internal
+
+  frontend:
+    build: ./frontend
+    restart: always
+    env_file: ./frontend/.env.local
+    environment:
+      - NEXT_PUBLIC_API_URL=http://api.localhost/api/v1
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app.rule=Host(`app.localhost`)"
+      - "traefik.http.routers.app.entrypoints=web"
+      - "traefik.http.services.app.loadbalancer.server.port=3000"
+    depends_on:
+      - backend
+    networks:
+      - devops_proxy
+
+  deployer:
+    build: ./services/deployer
+    restart: always
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    env_file: ./services/deployer/.env
+    environment:
+      - REDIS_HOST=redis
+      - BACKEND_API_URL=http://backend:8000/api/v1
+    depends_on:
+      - redis
+      - backend
+    networks:
+      - devops_internal
+
+networks:
+  devops_proxy:
+    name: devops_proxy
+  devops_internal:
+
+
+volumes:
+  postgres_data:

@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlalchemy[asyncio]
+psycopg2-binary
+asyncpg
+alembic
+pydantic-settings
+python-dotenv
+supabase
+redis
+pygithub # for github repo listing
+httpx
+python-jose[cryptography] # for jwt if needed
+passlib[bcrypt]
