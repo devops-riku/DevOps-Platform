@@ -6,6 +6,7 @@ class StackBase(BaseModel):
     name: str
     type: str # backend, frontend, database
     dockerfile_template: str
+    docker_compose_template: str | None = None
     default_port: int = 8000
     description: str | None = None
     icon_name: str | None = None

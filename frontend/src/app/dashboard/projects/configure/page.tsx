@@ -150,7 +150,13 @@ function ConfigureContent() {
                 // 3. Fetch Stacks
                 const stacksRes = await axios.get(`${apiUrl}/stacks/`)
                 setStacks(stacksRes.data)
-                if (stacksRes.data.length > 0) setSelectedStack(stacksRes.data[0].name)
+                if (stacksRes.data.length > 0) {
+                    const firstStack = stacksRes.data[0]
+                    setSelectedStack(firstStack.name)
+                    if (deployType === 'pipeline' && firstStack.default_port) {
+                        setContainerPort(firstStack.default_port.toString())
+                    }
+                }
             } catch (err) {
                 console.error("Failed to fetch repository details", err)
             } finally {
@@ -215,6 +221,24 @@ function ConfigureContent() {
         }
     }
 
+    const detectPortFromCommand = (cmd: string) => {
+        // Look for --port N or -p N or --port=N
+        const portRegex = /(?:--port|-p)(?:\s+|=)(\d+)/
+        const match = cmd.match(portRegex)
+        if (match && match[1]) {
+            return match[1]
+        }
+        return null
+    }
+
+    const handleStartCommandChange = (val: string) => {
+        setStartCommand(val)
+        const detected = detectPortFromCommand(val)
+        if (detected) {
+            setContainerPort(detected)
+        }
+    }
+
     const deployProject = async () => {
         setSubmitting(true)
         try {
@@ -237,13 +261,13 @@ function ConfigureContent() {
                 env_vars: envObj,
                 workspace_id: workspaceId,
                 deploy_type: deployType,
-                docker_config: deployType === 'docker' ? {
+                docker_config: {
                     source: dockerSource,
                     dockerfile_path: dockerfilePath,
                     build_context: buildContext,
                     container_port: containerPort,
                     registry_image: registryImage
-                } : null
+                }
             }, {
                 headers: {
                     Authorization: `Bearer ${getAuthToken()}`
@@ -355,7 +379,16 @@ function ConfigureContent() {
                                     {deployType === 'pipeline' && (
                                         <div className="space-y-3">
                                             <label className="text-[10px] font-bold text-slate-600 uppercase tracking-widest ml-1">Runtime Environment</label>
-                                            <Select value={selectedStack} onValueChange={setSelectedStack}>
+                                            <Select 
+                                                value={selectedStack} 
+                                                onValueChange={(val) => {
+                                                    setSelectedStack(val)
+                                                    const stack = stacks.find(s => s.name === val)
+                                                    if (stack?.default_port) {
+                                                        setContainerPort(stack.default_port.toString())
+                                                    }
+                                                }}
+                                            >
                                                 <SelectTrigger>
                                                     <SelectValue placeholder="Select execution stack" />
                                                 </SelectTrigger>
@@ -525,6 +558,12 @@ function ConfigureContent() {
                                                         className="w-full bg-black/40 border border-white/5 rounded-lg py-4 px-6 focus:border-cyan-500/50 outline-none transition-all text-cyan-400 font-mono text-sm"
                                                         placeholder="3000"
                                                     />
+                                                    <div className="flex items-start gap-2 px-1">
+                                                        <Info className="w-3 h-3 text-slate-600 mt-0.5" />
+                                                        <p className="text-[9px] text-slate-600 font-medium leading-relaxed">
+                                                            Traefik handles external collisions automatically. We just need to know which port your app listens on internally.
+                                                        </p>
+                                                    </div>
                                                 </div>
                                                 <div className="space-y-3">
                                                     <label className="text-[10px] font-bold text-slate-600 uppercase tracking-widest ml-1">Override Entrypoint (Optional)</label>
@@ -556,16 +595,34 @@ function ConfigureContent() {
                                             <input
                                                 type="text"
                                                 value={startCommand}
-                                                onChange={(e) => setStartCommand(e.target.value)}
+                                                onChange={(e) => handleStartCommandChange(e.target.value)}
                                                 className="w-full bg-black/40 border border-white/5 rounded-lg py-4 px-6 focus:border-cyan-500/50 outline-none transition-all text-cyan-400 font-mono text-sm"
                                                 placeholder="e.g. npm start or gunicorn app:app"
                                             />
                                         </div>
-                                        <div className="bg-primary/5 p-6 rounded-lg border border-primary/10">
-                                            <div className="flex items-center gap-3 text-primary font-bold text-[10px] uppercase tracking-widest">
-                                                <Info className="w-4 h-4" /> Optimization Notice
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                            <div className="space-y-3">
+                                                <label className="text-[10px] font-bold text-slate-600 uppercase tracking-widest ml-1">Internal Container Port</label>
+                                                <input
+                                                    type="text"
+                                                    value={containerPort}
+                                                    onChange={(e) => setContainerPort(e.target.value)}
+                                                    className="w-full bg-black/40 border border-white/5 rounded-lg py-4 px-6 focus:border-cyan-500/50 outline-none transition-all text-cyan-400 font-mono text-sm"
+                                                    placeholder="3000"
+                                                />
+                                                <div className="flex items-start gap-2 px-1">
+                                                    <Info className="w-3 h-3 text-slate-600 mt-0.5" />
+                                                    <p className="text-[9px] text-slate-600 font-medium leading-relaxed">
+                                                        Traefik handles external collisions automatically. We just need to know which port your app listens on internally.
+                                                    </p>
+                                                </div>
                                             </div>
-                                            <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">System defaults will be applied if commands are left blank. Our engine auto-detects standard frameworks during the pre-build phase.</p>
+                                            <div className="bg-primary/5 p-6 rounded-lg border border-primary/10">
+                                                <div className="flex items-center gap-3 text-primary font-bold text-[10px] uppercase tracking-widest">
+                                                    <Info className="w-4 h-4" /> Optimization Notice
+                                                </div>
+                                                <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">System defaults will be applied if commands are left blank. Our engine auto-detects standard frameworks.</p>
+                                            </div>
                                         </div>
                                     </div>
                                 )}
@@ -687,8 +744,9 @@ function ConfigureContent() {
                                             <div className="text-base font-bold text-white">{branch}</div>
                                         </div>
                                         <div className="p-8 bg-white/[0.01]">
-                                            <div className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-3 flex items-center gap-2"><Globe className="w-3.5 h-3.5" /> Deployment</div>
-                                            <div className="text-base font-bold text-cyan-500 uppercase">CloudFlow Optimized</div>
+                                            <div className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-3 flex items-center gap-2"><Globe className="w-3.5 h-3.5" /> Deployment URL</div>
+                                            <div className="text-base font-bold text-cyan-500 uppercase">http://{repoName?.toLowerCase()}-{"ID[:8]"}.localhost</div>
+                                            <div className="text-[8px] text-slate-700 font-bold uppercase mt-1">Multi-user collision protection active</div>
                                         </div>
                                         <div className="p-8 bg-white/[0.01]">
                                             <div className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-3 flex items-center gap-2"><Zap className="w-3.5 h-3.5" /> Infrastructure</div>

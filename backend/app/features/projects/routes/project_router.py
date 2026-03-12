@@ -45,6 +45,8 @@ async def list_projects(
             "start_command": p.start_command,
             "root_dir": p.root_dir,
             "container_id": p.container_id,
+            "language": p.language,
+            "container_port": (p.docker_config or {}).get("container_port", "80"),
             "url": f"http://{p.github_repo_name}.localhost" if p.status == 'active' else None
         }
         for p in projects
@@ -79,12 +81,27 @@ async def get_project_logs(
     logs = await ProjectService.get_project_logs(project_id, db, redis_client)
     return {"logs": logs}
 
+@router.patch("/{project_id}", response_model=dict)
+async def update_project(
+    project_id: str,
+    data: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    # In a real app we'd verify current_user owns project
+    await ProjectService.update_project(project_id, data, db)
+    return {"status": "success"}
+
 @router.patch("/internal/{project_id}/status")
 async def update_status_internal(
     project_id: str,
     data: dict,
     db: AsyncSession = Depends(get_db)
 ):
+    import datetime
+    with open("orchestration.log", "a") as f:
+        f.write(f"[{datetime.datetime.now()}] Project {project_id} Status Patch: {data}\n")
+    print(f"INTERNAL STATUS UPDATE: Project {project_id} -> {data}")
     await ProjectService.update_project(project_id, data, db)
     return {"status": "updated"}
 

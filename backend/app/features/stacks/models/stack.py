@@ -16,6 +16,7 @@ class Stack(Base):
     
     # Template Configuration
     dockerfile_template: Mapped[str] = mapped_column(Text)
+    docker_compose_template: Mapped[str | None] = mapped_column(Text)
     default_port: Mapped[int] = mapped_column(Integer, default=8000)
     
     # Metadata for the UI

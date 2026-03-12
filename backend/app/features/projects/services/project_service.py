@@ -119,7 +119,17 @@ class ProjectService:
             raise HTTPException(status_code=404, detail="Project not found")
             
         for key, value in data.items():
-            if hasattr(project, key):
+            if key == "container_port":
+                logger.info(f"UPDATING PORT for project {project_id}: {value}")
+                current_config = project.docker_config or {}
+                if not isinstance(current_config, dict):
+                    current_config = {}
+                new_config = dict(current_config)
+                new_config["container_port"] = str(value)
+                project.docker_config = new_config
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(project, "docker_config")
+            elif hasattr(project, key):
                 setattr(project, key, value)
                 
         await db.commit()

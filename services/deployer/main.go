@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,6 +84,9 @@ func main() {
 
 	log.Println("Connected to Redis. Listening for deployments...")
 
+	// Ensure infra network
+	ensureNetwork("devops_proxy")
+
 	for {
 		// BLPOP blocks until a message is available in the 'deployments' list
 		result, err := rdb.BLPop(ctx, 0, "deployments").Result()
@@ -135,6 +137,8 @@ func reportStatus(projectID string, status string, containerID string) {
 	
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Backend returned error on status update: %d\n", resp.StatusCode)
+	} else {
+		log.Printf("Successfully updated project %s status to %s\n", projectID, status)
 	}
 }
 
@@ -198,8 +202,12 @@ func processDeployment(task DeploymentTask) {
 	}
 
 	// 2. Prepare Docker Environment
+	projShortID := task.ID
+	if len(task.ID) > 8 {
+		projShortID = task.ID[:8]
+	}
 	imageName := strings.ToLower(fmt.Sprintf("devops-%s", task.RepoName))
-	containerName := strings.ToLower(fmt.Sprintf("devops-svc-%s", task.RepoName))
+	containerName := strings.ToLower(fmt.Sprintf("devops-svc-%s-%s", task.RepoName, projShortID))
 	
 	var deploymentFailed bool
 	defer func() {
@@ -234,6 +242,11 @@ func processDeployment(task DeploymentTask) {
 		template := task.DockerfileTemplate
 		template = strings.ReplaceAll(template, "${BUILD_COMMAND}", task.BuildCommand)
 		template = strings.ReplaceAll(template, "${START_COMMAND}", task.StartCommand)
+		
+		// Use ContainerPort if specified, fallback to 80
+		port := task.DockerConfig.ContainerPort
+		if port == "" { port = "80" }
+		template = strings.ReplaceAll(template, "${PORT}", port)
 
 		err := os.WriteFile(absDFPath, []byte(template), 0644)
 		if err != nil {
@@ -266,8 +279,8 @@ func processDeployment(task DeploymentTask) {
 	log.Println("Building Docker image...")
 	reportLog(task.ID, "info", "Starting Docker build process...")
 	
-	// Use --platform linux/amd64 for better compatibility and --no-cache to see full progress
-	buildCmd := exec.Command("docker", "build", "--platform", "linux/amd64", "-t", imageName, "-f", absDFPath, absCtxPath)
+	// Use --platform linux/amd64 for better compatibility and --no-cache to ensure fresh builds
+	buildCmd := exec.Command("docker", "build", "--no-cache", "--platform", "linux/amd64", "-t", imageName, "-f", absDFPath, absCtxPath)
 	
 	// Stream output to logs concurrently
 	stdout, _ := buildCmd.StdoutPipe()
@@ -309,40 +322,75 @@ func processDeployment(task DeploymentTask) {
 	port := task.DockerConfig.ContainerPort
 	if port == "" { port = "80" }
 
-	// Prepare run arguments
-	runArgs := []string{"run", "-d", "--name", containerName, "--network", "devops_proxy"}
-	
-	// Traefik Labels for dynamic routing
-	hostRule := fmt.Sprintf("Host(`%s.localhost`)", strings.ToLower(task.RepoName))
-	runArgs = append(runArgs, "--label", "traefik.enable=true")
-	runArgs = append(runArgs, "--label", fmt.Sprintf("traefik.http.routers.%s.rule=%s", containerName, hostRule))
-	runArgs = append(runArgs, "--label", fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port=%s", containerName, port))
-	runArgs = append(runArgs, "--label", "traefik.http.routers."+containerName+".entrypoints=web")
+	reportLog(task.ID, "info", "Generating Docker Compose manifest...")
 
-	// Inject Env Vars
+	// Build environment variables string for YAML
+	envVarsYaml := ""
 	for k, v := range task.EnvVars {
-		runArgs = append(runArgs, "-e", fmt.Sprintf("%s=%s", k, v))
+		envVarsYaml += fmt.Sprintf("      - %s=%s\n", k, v)
 	}
-	
-	// Keep port mapping for local access as fallback
-	runArgs = append(runArgs, "-p", fmt.Sprintf("%s:%s", port, port))
-	
-	// Image Name
-	runArgs = append(runArgs, imageName)
 
-	runCmd := exec.Command("docker", runArgs...)
-	output, err := runCmd.CombinedOutput()
+	// Traefik Host Rule - use project ID for uniqueness
+	hostRule := fmt.Sprintf("Host(`%s-%s.localhost`)", strings.ToLower(task.RepoName), projShortID)
+
+	// Compose template
+	composeTemplate := `services:
+  app:
+    image: ${IMAGE_NAME}
+    container_name: ${CONTAINER_NAME}
+    networks:
+      - devops_proxy
+    environment:
+${ENV_VARS}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.${CONTAINER_NAME}.rule=${HOST_RULE}"
+      - "traefik.http.services.${CONTAINER_NAME}.loadbalancer.server.port=${PORT}"
+      - "traefik.http.routers.${CONTAINER_NAME}.entrypoints=web"
+    restart: always
+
+networks:
+  devops_proxy:
+    external: true
+`
+
+	composeContent := strings.ReplaceAll(composeTemplate, "${IMAGE_NAME}", imageName)
+	composeContent = strings.ReplaceAll(composeContent, "${CONTAINER_NAME}", containerName)
+	composeContent = strings.ReplaceAll(composeContent, "${HOST_RULE}", hostRule)
+	composeContent = strings.ReplaceAll(composeContent, "${PORT}", port)
+	composeContent = strings.ReplaceAll(composeContent, "${ENV_VARS}", envVarsYaml)
+
+	composePath := filepath.Join(repoPath, "docker-compose.yml")
+	err = os.WriteFile(composePath, []byte(composeContent), 0644)
 	if err != nil {
-		errStr := fmt.Sprintf("Docker Run FAILED: %v", err)
+		errStr := fmt.Sprintf("Failed to write docker-compose.yml: %v", err)
 		log.Println(errStr)
 		reportLog(task.ID, "error", errStr)
 		deploymentFailed = true
 		return
 	}
-	
-	reportLog(task.ID, "success", "Service is up and running.")
-	
-	containerID := strings.TrimSpace(string(output))
+	reportLog(task.ID, "success", "Docker Compose manifest generated.")
+
+	log.Println("Launching with Docker Compose...")
+	reportLog(task.ID, "info", "Executing compose up sequence...")
+
+	// Use -p to ensure a clean project name space
+	composeCmd := exec.Command("docker", "compose", "-f", composePath, "-p", containerName, "up", "-d", "--force-recreate")
+	output, err := composeCmd.CombinedOutput()
+	if err != nil {
+		errStr := fmt.Sprintf("Docker Compose UP FAILED: %v (Output: %s)", err, strings.TrimSpace(string(output)))
+		log.Println(errStr)
+		reportLog(task.ID, "error", errStr)
+		deploymentFailed = true
+		return
+	}
+
+	reportLog(task.ID, "success", "Service is up and running via Compose.")
+
+	// Get Container ID for return
+	inspectCmd := exec.Command("docker", "inspect", "--format", "{{.Id}}", containerName)
+	idOutput, _ := inspectCmd.Output()
+	containerID := strings.TrimSpace(string(idOutput))
 	shortID := containerID
 	if len(containerID) > 12 {
 		shortID = containerID[:12]
@@ -350,8 +398,18 @@ func processDeployment(task DeploymentTask) {
 
 	log.Printf("<<< Deployment SUCCESS: %s\n", task.RepoName)
 	log.Printf("Container ID: %s\n", shortID)
-	log.Printf("Service accessible at: http://localhost:%s\n", port)
-	
+	log.Printf("Service accessible at: http://%s-%s.localhost\n", strings.ToLower(task.RepoName), projShortID)
+
 	reportStatus(task.ID, "active", shortID)
+}
+
+func ensureNetwork(name string) {
+	// Check if network exists
+	cmd := exec.Command("docker", "network", "inspect", name)
+	if err := cmd.Run(); err != nil {
+		// Create it if not
+		log.Printf("Network %s missing. Initializing orchestration substrate...\n", name)
+		exec.Command("docker", "network", "create", name).Run()
+	}
 }
 
